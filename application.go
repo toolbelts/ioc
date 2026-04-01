@@ -11,7 +11,6 @@ import (
 	"sync/atomic"
 	"syscall"
 
-	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
 
@@ -44,7 +43,6 @@ type Application struct {
 	setupDone     bool                      // SetupAll() 完成后为 true
 	setupCtx      context.Context           // SetupAll 时保存，延迟 provider Setup 时使用
 	shutdownCbs   []func()                  // 额外的关闭回调
-	logger        zerolog.Logger
 }
 
 // New 创建一个新的 Application 及空容器。
@@ -53,7 +51,6 @@ func New() *Application {
 		Container:     NewContainer(),
 		providerNames: make(map[string]bool),
 		deferred:      make(map[string]*deferredEntry),
-		logger:        log.With().Str("module", "ioc").Logger(),
 	}
 
 	// 自绑定，使提供者可以解析应用本身
@@ -85,14 +82,14 @@ func (a *Application) Register(providers ...Provider) {
 				a.deferred[abstract] = entry
 			}
 			a.deferredCount.Add(int32(len(provides)))
-			a.logger.Info().Str("provider", name).Any("provides", provides).Msg("deferred")
+			log.Info().Str("provider", name).Any("provides", provides).Msg("deferred")
 			continue
 		}
 
 		// 立即注册
 		p.Register(a)
 		a.providers = append(a.providers, registeredProvider{name: name, provider: p})
-		a.logger.Info().Str("provider", name).Msg("registered")
+		log.Info().Str("provider", name).Msg("registered")
 	}
 }
 
@@ -118,7 +115,7 @@ func (a *Application) SetupAll(ctx context.Context) error {
 			return fmt.Errorf("ioc: setup cancelled: %w", err)
 		}
 		if s, ok := rp.provider.(Setupable); ok {
-			a.logger.Info().Str("provider", rp.name).Msg("setup")
+			log.Ctx(ctx).Info().Str("provider", rp.name).Msg("setup")
 			if err := s.Setup(ctx, a); err != nil {
 				return fmt.Errorf("ioc: setup %s: %w", rp.name, err)
 			}
@@ -166,7 +163,7 @@ func (a *Application) ShutdownAll(ctx context.Context) error {
 		}
 		rp := providers[i]
 		if s, ok := rp.provider.(Shutdownable); ok {
-			a.logger.Info().Str("provider", rp.name).Msg("shutdown")
+			log.Ctx(ctx).Info().Str("provider", rp.name).Msg("shutdown")
 			if err := s.Shutdown(ctx, a); err != nil {
 				errs = append(errs, fmt.Errorf("%s: %w", rp.name, err))
 			}
@@ -231,7 +228,7 @@ func (a *Application) loadDeferred(abstract string) error {
 		setupDone := a.setupDone
 		a.mu.Unlock()
 
-		a.logger.Info().Str("provider", entry.name).Msg("loading deferred")
+		log.Ctx(a.setupCtx).Info().Str("provider", entry.name).Msg("loading deferred")
 
 		// 如果已完成 setup 阶段，立即调用 Setup
 		if setupDone {
