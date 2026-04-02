@@ -22,6 +22,13 @@ type Shutdownable interface {
 	Shutdown(ctx context.Context, app *Application) error
 }
 
+// Servable 是可选接口。实现此接口的提供者会被 Run() 自动并发启动。
+// 当 Run() 未传入用户函数时，框架自动收集所有 Servable 提供者，并发调用 Serve(ctx)。
+// 任一 Serve 返回 error 时 Run 返回该 error，随后执行 ShutdownAll 清理所有资源。
+type Servable interface {
+	Serve(ctx context.Context) error
+}
+
 // DeferrableProvider 是可选接口。实现该接口的提供者不会立即注册，
 // 而是记录其 Provides() 列表，在第一次解析其中某个抽象名时按需注册。
 type DeferrableProvider interface {

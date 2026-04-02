@@ -266,11 +266,15 @@ func (a *Application) MustMake(abstract string) any {
 
 // ---------- 信号感知运行 ----------
 
-// Run 启动应用，运行给定函数，并在 SIGINT/SIGTERM 时确保优雅关闭。
-// ctx 用于控制整个生命周期，信号到达或 ctx 取消时 fn 收到的 context 会被取消。
+// Run 启动应用并在 SIGINT/SIGTERM 时确保优雅关闭。
+//
+// 当传入 fn 时，运行该函数（向后兼容）。
+// 当不传 fn 时，自动收集所有实现了 Servable 的提供者，并发启动它们。
+//
+// ctx 用于控制整个生命周期，信号到达或 ctx 取消时 fn/Serve 收到的 context 会被取消。
 // ShutdownAll 使用独立的 context.Background()，确保关闭流程不受 fn 取消影响。
 // 如需 shutdown 超时，调用方应直接使用 SetupAll + ShutdownAll 组合。
-func (a *Application) Run(ctx context.Context, fn func(ctx context.Context) error) error {
+func (a *Application) Run(ctx context.Context, fns ...func(ctx context.Context) error) error {
 	if err := a.SetupAll(ctx); err != nil {
 		return err
 	}
@@ -280,8 +284,13 @@ func (a *Application) Run(ctx context.Context, fn func(ctx context.Context) erro
 	)
 	defer cancel()
 
-	// 运行用户函数
-	runErr := fn(ctx)
+	// 有 fn 时运行 fn（向后兼容），否则自动启动 Servable 提供者
+	var runErr error
+	if len(fns) > 0 && fns[0] != nil {
+		runErr = fns[0](ctx)
+	} else {
+		runErr = a.serveAll(ctx)
+	}
 
 	// 无论运行是否出错，都执行关闭；使用独立 context 确保关闭不被跳过
 	shutdownErr := a.ShutdownAll(context.Background())
@@ -290,4 +299,41 @@ func (a *Application) Run(ctx context.Context, fn func(ctx context.Context) erro
 		return runErr
 	}
 	return shutdownErr
+}
+
+// serveAll 收集所有实现了 Servable 的提供者，并发启动它们。
+// 任一 Serve 返回 error 时立即返回，Run 随后会调用 ShutdownAll 清理其余服务。
+// 无 Servable 提供者时阻塞等待 ctx 取消（等待信号优雅退出）。
+func (a *Application) serveAll(ctx context.Context) error {
+	a.mu.RLock()
+	providers := make([]registeredProvider, len(a.providers))
+	copy(providers, a.providers)
+	a.mu.RUnlock()
+
+	var servables []Servable
+	for _, rp := range providers {
+		if s, ok := rp.provider.(Servable); ok {
+			servables = append(servables, s)
+		}
+	}
+
+	if len(servables) == 0 {
+		log.Info().Msg("no servable providers, waiting for signal")
+		<-ctx.Done()
+		return nil
+	}
+
+	log.Info().Int("count", len(servables)).Msg("starting servable providers")
+
+	errCh := make(chan error, len(servables))
+	for _, s := range servables {
+		go func() { errCh <- s.Serve(ctx) }()
+	}
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		return nil
+	}
 }

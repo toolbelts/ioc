@@ -510,6 +510,123 @@ func TestApp_ShutdownAll_Cancelled(t *testing.T) {
 	}
 }
 
+// ---------- Run 自动 Serve ----------
+
+// servableMockProvider 同时实现 Provider + Servable，用于测试自动启动
+type servableMockProvider struct {
+	serveCalled atomic.Bool
+	serveErr    error
+	serveDone   chan struct{} // Serve 开始后关闭，通知测试
+}
+
+func (p *servableMockProvider) Register(_ *ioc.Application) {}
+func (p *servableMockProvider) Serve(ctx context.Context) error {
+	p.serveCalled.Store(true)
+	if p.serveDone != nil {
+		close(p.serveDone)
+	}
+	if p.serveErr != nil {
+		return p.serveErr
+	}
+	<-ctx.Done()
+	return nil
+}
+
+func TestApp_Run_AutoServe(t *testing.T) {
+	app := ioc.New()
+	sp := &servableMockProvider{serveDone: make(chan struct{})}
+	app.Register(sp)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	go func() {
+		<-sp.serveDone // 等待 Serve 被调用
+		cancel()       // 触发关闭
+	}()
+
+	err := app.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run auto-serve should succeed: %v", err)
+	}
+	if !sp.serveCalled.Load() {
+		t.Error("Serve should be called automatically")
+	}
+}
+
+func TestApp_Run_AutoServe_Error(t *testing.T) {
+	app := ioc.New()
+	expectedErr := errors.New("serve failed")
+	sp := &servableMockProvider{serveErr: expectedErr}
+	app.Register(sp)
+
+	err := app.Run(context.Background())
+	if !errors.Is(err, expectedErr) {
+		t.Errorf("Run should propagate Serve error: got %v", err)
+	}
+}
+
+func TestApp_Run_WithFn_BackwardCompat(t *testing.T) {
+	app := ioc.New()
+	sp := &servableMockProvider{}
+	fnCalled := false
+	app.Register(sp)
+
+	err := app.Run(context.Background(), func(ctx context.Context) error {
+		fnCalled = true
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Run should succeed: %v", err)
+	}
+	if !fnCalled {
+		t.Error("fn should be called when provided")
+	}
+	if sp.serveCalled.Load() {
+		t.Error("Serve should NOT be called when fn is provided")
+	}
+}
+
+// servableMockProvider2 第二个 Servable mock，类型不同以避免 Register 去重
+type servableMockProvider2 struct {
+	serveCalled atomic.Bool
+	serveDone   chan struct{}
+}
+
+func (p *servableMockProvider2) Register(_ *ioc.Application) {}
+func (p *servableMockProvider2) Serve(ctx context.Context) error {
+	p.serveCalled.Store(true)
+	if p.serveDone != nil {
+		close(p.serveDone)
+	}
+	<-ctx.Done()
+	return nil
+}
+
+func TestApp_Run_AutoServe_MultipleServables(t *testing.T) {
+	app := ioc.New()
+	done1 := make(chan struct{})
+	done2 := make(chan struct{})
+	sp1 := &servableMockProvider{serveDone: done1}
+	sp2 := &servableMockProvider2{serveDone: done2}
+	app.Register(sp1, sp2)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	go func() {
+		<-done1
+		<-done2
+		cancel()
+	}()
+
+	err := app.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run should succeed: %v", err)
+	}
+	if !sp1.serveCalled.Load() || !sp2.serveCalled.Load() {
+		t.Error("both Servable providers should be started")
+	}
+}
+
 func TestApp_Run_WithParentContext(t *testing.T) {
 	app := ioc.New()
 	app.Register(&mockProvider{})
